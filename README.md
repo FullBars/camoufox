@@ -640,6 +640,17 @@ anchor tab's container.
 The window is shared, so a context viewport still resizes it, the same way any
 new tab in that window already does.
 
+### SOCKS proxies
+
+`Browser.setBrowserProxy` and `Browser.setContextProxy` take `type`, `host`,
+`port`, `bypass`, and optional `username` and `password`. `type` is `http`,
+`https`, `socks`, `socks5`, or `socks4`. `socks` and `socks5` are both SOCKS5.
+Leave the username and password off for a no-auth proxy. Set both for RFC 1929
+username/password. `socks4` accepts a username (the userid) and rejects a
+password, which Firefox's SOCKS4 handshake does not send. HTTP and HTTPS
+credentials are unchanged. Details and the JSON shape are in
+[`additions/juggler/protocol/PROTOCOL.md`](additions/juggler/protocol/PROTOCOL.md).
+
 ### Triggering a release build
 
 Firefox is not compiled on every push. `.github/workflows/tests.yml` still

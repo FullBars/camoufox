@@ -305,7 +305,7 @@ const Browser = {
     'clearCache': {},
     'setBrowserProxy': {
       params: {
-        type: t.Enum(['http', 'https', 'socks', 'socks4']),
+        type: t.Enum(['http', 'https', 'socks', 'socks5', 'socks4']),
         bypass: t.Array(t.String),
         host: t.String,
         port: t.Number,
@@ -316,7 +316,7 @@ const Browser = {
     'setContextProxy': {
       params: {
         browserContextId: t.Optional(t.String),
-        type: t.Enum(['http', 'https', 'socks', 'socks4']),
+        type: t.Enum(['http', 'https', 'socks', 'socks5', 'socks4']),
         bypass: t.Array(t.String),
         host: t.String,
         port: t.Number,
