@@ -1,0 +1,297 @@
+name: Browser release
+
+# A downloadable browser for this fork. The compile and package steps are the
+# ones release.yml uses (ci.run_prepare, then multibuild.py, which runs
+# `make package-<os>` and names the zip in scripts/package.py). tests.yml is
+# still the pull-request gate, and it builds when additions/ (Juggler included)
+# changes. This workflow does not run on branch pushes or pull requests.
+#
+# Triggers:
+#   workflow_dispatch   linux x86_64 on ubuntu-24.04, unless inputs say otherwise.
+#                       With no tag input, the release tag is the next unused
+#                       v<version>-<prefix>.<n>.
+#   tag v<version>-*    a browser tag such as v156.0.1-beta.38. Library tags
+#                       (v0.5.7) do not match. set-build writes the tag's
+#                       number into upstream.sh so the zip name matches.
+#
+# `runner` defaults to ubuntu-24.04. Set the input, or the repository variable
+# CAMOUFOX_BUILD_RUNNER, to a self-hosted label when a larger machine exists.
+# Windows and macOS are cross-compiled from Linux, as in release.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "linux (x86_64) or all (linux, windows, macos; release.yml's matrix)"
+        type: choice
+        options:
+          - linux
+          - all
+        default: linux
+      runner:
+        description: "Compile runner. ubuntu-24.04, or a self-hosted label"
+        type: string
+        default: ubuntu-24.04
+      tag:
+        description: "GitHub Release tag. Empty: the tag ref, or this branch if it is a browser tag, otherwise v<version>-<release> from upstream.sh"
+        type: string
+        required: false
+  push:
+    # Browser tags only (v156.0.1-beta.36). A library tag (v0.5.7) does not
+    # match, so it does not start a Firefox compile.
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions: {}
+
+concurrency:
+  group: browser-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Choose platforms
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      runner: ${{ steps.set.outputs.runner }}
+      tag: ${{ steps.set.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - id: set
+        env:
+          INPUT_RUNNER: ${{ github.event.inputs.runner }}
+          INPUT_PLATFORMS: ${{ github.event.inputs.platforms }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          VAR_RUNNER: ${{ vars.CAMOUFOX_BUILD_RUNNER }}
+        run: |
+          set -euo pipefail
+          runner="${INPUT_RUNNER:-}"
+          if [ -z "$runner" ]; then
+            runner="${VAR_RUNNER:-ubuntu-24.04}"
+          fi
+          if [ -z "$runner" ]; then
+            runner="ubuntu-24.04"
+          fi
+          platforms="${INPUT_PLATFORMS:-linux}"
+          case "$platforms" in
+            linux)
+              matrix='{"include":[{"target":"linux","arch":"x86_64"}]}'
+              ;;
+            all)
+              # release.yml's matrix, including the same unsupported exclusions.
+              matrix='{"include":[{"target":"linux","arch":"x86_64"},{"target":"linux","arch":"arm64"},{"target":"windows","arch":"x86_64"},{"target":"windows","arch":"i686"},{"target":"macos","arch":"x86_64"},{"target":"macos","arch":"arm64"}]}'
+              ;;
+            *)
+              echo "::error::platforms must be linux or all"
+              exit 1
+              ;;
+          esac
+          if [ "$REF_TYPE" = "tag" ]; then
+            tag="$REF_NAME"
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            # Next unused browser number. upstream.sh is the floor; existing
+            # v* tags count, same rule as ci.release.next_browser_release.
+            tag=$(python3 -c 'from ci.release import next_browser_release; from ci._util import REPO_ROOT, read_upstream_sh, run; up = read_upstream_sh(); tags = run(["git", "tag", "-l", "v*"], cwd=REPO_ROOT, check=True).stdout.split(); print("v%s-%s" % (up["version"], next_browser_release(up["release"], tags)))')
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::could not decide a release tag"
+            exit 1
+          fi
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building $platforms as $tag on $runner"
+
+  build:
+    name: Build (${{ matrix.target }} ${{ matrix.arch }})
+    needs: plan
+    runs-on: ${{ needs.plan.outputs.runner }}
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      # patch.py reads BUILD_TARGET and otherwise defaults to macos,arm64.
+      # multibuild.py sets it again before compiling.
+      BUILD_TARGET: ${{ matrix.target }},${{ matrix.arch }}
+      PYTHON_VERSION: "3.12"
+    steps:
+      - name: Maximize build space
+        # GitHub-hosted images are disposable. A self-hosted runner is not, so
+        # the package-removal and swap steps stay off it.
+        if: startsWith(needs.plan.outputs.runner, 'ubuntu-')
+        uses: AdityaGarg8/remove-unwanted-software@8831c82abf29b34eb2caac48d5f999ecfc0d8eef # v4.1
+        with:
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+          remove-cached-tools: "true"
+          remove-swapfile: "true"
+          verbose: "false"
+
+      - name: Remove unwanted tools
+        if: startsWith(needs.plan.outputs.runner, 'ubuntu-')
+        run: |
+          sudo apt-get remove -y '^aspnetcore-.*' > /dev/null || true
+          sudo apt-get remove -y '^dotnet-.*' > /dev/null || true
+          sudo apt-get remove -y '^llvm-.*' > /dev/null || true
+          sudo apt-get remove -y 'php.*' > /dev/null || true
+          sudo apt-get remove -y '^mongodb-.*' > /dev/null || true
+          sudo apt-get remove -y '^mysql-.*' > /dev/null || true
+          sudo apt-get remove -y azure-cli google-chrome-stable firefox mono-devel libgl1-mesa-dri --fix-missing > /dev/null || true
+          sudo apt-get autoremove -y > /dev/null || true
+          sudo apt-get clean > /dev/null || true
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Name this release
+        # No-op unless the tag is v<firefox version>-<prefix>.<n>. The number
+        # is written only in this job's working tree, which is how release.yml
+        # names camoufox-<version>-<release>-<os>.<arch>.zip.
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if printf '%s' "$TAG" | grep -Eq '^v[^-]+-[a-z]+\.[0-9]+$'; then
+            python3 -m ci.release set-build --tag "$TAG"
+          else
+            echo "Tag $TAG is not a browser release tag; packaging with upstream.sh as committed"
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Set up LLVM
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y lld-18 clang-18
+          if [ "${{ matrix.arch }}" != "x86_64" ]; then
+            sudo apt-get install -y libc6-i386 lib32gcc-s1 lib32stdc++6 gcc-multilib g++-multilib
+          fi
+          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-18 100
+
+      - name: Check disk space
+        run: df -h
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y msitools p7zip-full aria2 ccache fontconfig
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.target }}-${{ matrix.arch }}-${{ hashFiles('upstream.sh', 'patches/**', 'additions/**', 'assets/*.mozconfig') }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-${{ matrix.arch }}-
+            ccache-
+
+      - name: Fetch the font bundle
+        run: make fonts-extract
+
+      - name: Prepare the source tree
+        run: |
+          ccache -M 8G && ccache -z
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+          python3 -m ci.run_prepare
+
+      - name: Create swap space
+        if: startsWith(needs.plan.outputs.runner, 'ubuntu-')
+        run: |
+          sudo fallocate -l 24G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+          df -h /
+
+      - name: Build
+        env:
+          CARGO_BUILD_JOBS: "1"
+        run: python3 ./multibuild.py --target ${{ matrix.target }} --arch ${{ matrix.arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: CamoufoxBuilds-${{ matrix.target }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the GitHub Release
+    needs: [plan, build]
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download the builds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: CamoufoxBuilds-*
+          path: artifacts
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          test -n "$TAG"
+          digest=$(python3 -m ci.browser_inputs --source-digest)
+          python3 -m ci.release manifest --tag "$TAG" --digest "$digest" --commit "$GITHUB_SHA" > manifest.json
+          cat manifest.json
+          mapfile -t files < <(find artifacts -type f -name 'camoufox-*.zip' | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::no camoufox-*.zip assets were built"
+            exit 1
+          fi
+          printf 'Assets:\n'
+          printf '  %s\n' "${files[@]}"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          tag = os.environ["TAG"]
+          Path("notes.md").write_text(
+              f"Browser build for `{tag}`.\n\n"
+              "`Browser.newPage` still opens a window. `Browser.newPageInWindow` "
+              "adds a tab to an existing page's window under `browserContextId`. "
+              "See additions/juggler/protocol/PROTOCOL.md.\n\n"
+              "Zip names follow scripts/package.py: "
+              "`camoufox-<version>-<release>-lin.x86_64.zip` "
+              "(and `win.` / `mac.` when those platforms were built).\n"
+          )
+          PY
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}" manifest.json
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --prerelease --latest=false --title "$TAG" --notes-file notes.md \
+              "${files[@]}" manifest.json
+          fi

@@ -445,6 +445,65 @@ export class TargetRegistry {
     if (window.gBrowser.browsers.length !== 1)
       throw new Error(`Unexpected number of tabs in the new window: ${window.gBrowser.browsers.length}`);
     const browser = window.gBrowser.browsers[0];
+    return this._finishNewPage(browser, browserContext);
+  }
+
+  async newPageInWindow({browserContextId, targetId}) {
+    const result = globalNewPageChain.then(() => this._newPageInWindowInternal({browserContextId, targetId}));
+    globalNewPageChain = result.catch(error => { /* swallow errors to keep chain running */ });
+    return result;
+  }
+
+  // Same-window tab. userContextId is the container key onTabOpenListener and
+  // the cookie jar already use. No opener, so the anchor tab's container is
+  // not inherited. addTrustedTab is Firefox 156 Tabbrowser's system-principal
+  // addTab, the same principal newPage passes as window.arguments[8].
+  async _newPageInWindowInternal({browserContextId, targetId}) {
+    const browserContext = this.browserContextForId(browserContextId);
+    if (!browserContext)
+      throw new Error('Unknown browserContextId: ' + browserContextId);
+    const anchor = this._targetById(targetId);
+    if (!anchor)
+      throw new Error('Unknown targetId: ' + targetId);
+    const window = anchor._window;
+    if (!window || window.closed || !window.gBrowser)
+      throw new Error('Target ' + targetId + ' has no open browser window');
+    if (typeof window.gBrowser.addTrustedTab !== 'function')
+      throw new Error('This Firefox build has no gBrowser.addTrustedTab');
+
+    const userContextId = browserContext.userContextId || undefined;
+    const tab = window.gBrowser.addTrustedTab('about:blank', {
+      userContextId,
+      relatedToCurrent: false,
+      inBackground: false,
+      skipAnimation: true,
+    });
+    if (!tab || !tab.linkedBrowser)
+      throw new Error('Failed to add a tab to the window');
+    const createdId = await this._finishNewPage(tab.linkedBrowser, browserContext);
+    const created = this._targetById(createdId);
+    if (!created)
+      throw new Error('New tab was not registered');
+    const wrongWindow = created._window !== window || created._gBrowser !== window.gBrowser;
+    const wrongContext = created.browserContext() !== browserContext;
+    if (wrongWindow || wrongContext) {
+      created.close();
+      if (wrongWindow)
+        throw new Error('New tab opened outside the requested window');
+      throw new Error('New tab is not in the requested browser context');
+    }
+    return createdId;
+  }
+
+  _targetById(targetId) {
+    for (const target of this._browserToTarget.values()) {
+      if (target.id() === targetId)
+        return target;
+    }
+    return null;
+  }
+
+  async _finishNewPage(browser, browserContext) {
     let target = this._browserToTarget.get(browser);
     while (!target) {
       await helper.awaitEvent(this, TargetRegistry.Events.TargetCreated);

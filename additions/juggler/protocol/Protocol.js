@@ -277,6 +277,18 @@ const Browser = {
         targetId: t.String,
       }
     },
+    // Tab in an existing window. targetId is a page already in that window.
+    // browserContextId selects the container. newPage still opens a window.
+    // See protocol/PROTOCOL.md.
+    'newPageInWindow': {
+      params: {
+        targetId: t.String,
+        browserContextId: t.Optional(t.String),
+      },
+      returns: {
+        targetId: t.String,
+      },
+    },
     'close': {},
     'getInfo': {
       returns: {

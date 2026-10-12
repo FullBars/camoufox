@@ -608,6 +608,67 @@ graph TD
 
 This was originally based on the LibreWolf build system.
 
+## Team Browser tab containers
+
+`Browser.newPage` is unchanged. It opens a new window with one tab, in the
+given `browserContextId`, or in the default context when that parameter is
+omitted.
+
+`Browser.newPageInWindow` adds a tab to a window that is already open, so
+several cookie partitions can share one tab strip. The schema lives in
+[`additions/juggler/protocol/Protocol.js`](additions/juggler/protocol/Protocol.js);
+[`additions/juggler/protocol/PROTOCOL.md`](additions/juggler/protocol/PROTOCOL.md)
+is the short form.
+
+```json
+{
+  "id": 2,
+  "method": "Browser.newPageInWindow",
+  "params": {
+    "targetId": "<page already open in the window>",
+    "browserContextId": "<context, optional>"
+  }
+}
+```
+
+The response is `{ "targetId": "<new page>" }`, the same shape as
+`Browser.newPage`. `targetId` is any page already in that window. The new tab
+is selected, and its Firefox container is the context's `userContextId`.
+Cookie and storage isolation stay on that id. The tab does not inherit the
+anchor tab's container.
+
+The window is shared, so a context viewport still resizes it, the same way any
+new tab in that window already does.
+
+### Triggering a release build
+
+Firefox is not compiled on every push. `.github/workflows/tests.yml` still
+builds linux x86_64 on a pull request that changes `additions/` (including
+Juggler). The downloadable zip is published by
+[`.github/workflows/browser-release.yml`](.github/workflows/browser-release.yml),
+which reuses the compile and package steps from `release.yml`:
+
+- **Actions → Browser release → Run workflow.** Default is linux x86_64 on
+  `ubuntu-24.04`. Set `platforms` to `all` for the linux, windows and macOS
+  matrix `release.yml` already cross-compiles from Linux. Leave `tag` empty
+  to publish the next unused `v<version>-<prefix>.<n>` after the tags already
+  in the repo (the same numbering as `ci.release`).
+- **Push a new tag**, for example one number past the newest
+  `v156.0.1-beta.*` tag. A browser tag `v<version>-<prefix>.<n>` is applied
+  with `python3 -m ci.release set-build` before compile, so the zip's release
+  number matches the tag. Reusing a tag that already points at an older
+  commit does not move that commit.
+
+The asset name is `scripts/package.py`'s name:
+`camoufox-<version>-<release>-lin.x86_64.zip` (`win.` and `mac.` for the other
+platforms). The release is a prerelease and is not marked latest.
+
+To compile on a self-hosted runner later, set the workflow input `runner` to
+that runner's label (for example `self-hosted`), or set the repository variable
+`CAMOUFOX_BUILD_RUNNER`. The default remains the public GitHub-hosted runner
+`ubuntu-24.04`. Publishing the release still runs on `ubuntu-24.04`; only the
+compile job moves.
+
 ## Build CLI
 
 > [!WARNING]
