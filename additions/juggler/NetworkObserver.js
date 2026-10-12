@@ -19,6 +19,33 @@ const helper = new Helper();
 
 const UINT32_MAX = Math.pow(2, 32)-1;
 
+// Firefox authenticates SOCKS from nsIProxyInfo, not from the HTTP auth prompt.
+// A username left only on the Juggler proxy object never reaches the handshake.
+// "socks" is Firefox's name for SOCKS5; "socks5" is the same type.
+export function proxyEndpoint(proxy) {
+  const type = proxy.type === 'socks5' ? 'socks' : proxy.type;
+  const username = proxy.username || '';
+  const password = proxy.password || '';
+  const socks = type === 'socks' || type === 'socks4';
+  if (!socks)
+    return {type, username: '', password: '', isolationKey: '', auth: false};
+  if (type === 'socks4' && password)
+    throw new Error('SOCKS4 does not support a password');
+  if (password && !username)
+    throw new Error('SOCKS proxy password requires a username');
+  if (!username)
+    return {type, username: '', password: '', isolationKey: '', auth: false};
+  if (type === 'socks' && !password)
+    throw new Error('SOCKS5 username/password authentication requires a password');
+  const usernameBytes = new TextEncoder().encode(username).length;
+  const passwordBytes = new TextEncoder().encode(password).length;
+  // RFC 1929 lengths are octets. Firefox rejects anything longer than 255.
+  if (usernameBytes > 255 || passwordBytes > 255)
+    throw new Error('SOCKS username and password must each be at most 255 bytes');
+  // Different credentials to one host must not share a pooled socket.
+  return {type, username, password, isolationKey: username + '\0' + password, auth: true};
+}
+
 const BinaryInputStream = CC('@mozilla.org/binaryinputstream;1', 'nsIBinaryInputStream', 'setInputStream');
 const BinaryOutputStream = CC('@mozilla.org/binaryoutputstream;1', 'nsIBinaryOutputStream', 'setOutputStream');
 const StorageStream = CC('@mozilla.org/storagestream;1', 'nsIStorageStream', 'init');
@@ -626,16 +653,30 @@ export class NetworkObserver {
         }
         if (this._targetRegistry.shouldBustHTTPAuthCacheForProxy(proxy))
           Services.obs.notifyObservers(null, "net:clear-active-logins");
-        proxyFilter.onProxyFilterResult(protocolProxyService.newProxyInfo(
-            proxy.type,
+        const endpoint = proxyEndpoint(proxy);
+        const flags = Ci.nsIProxyInfo.TRANSPARENT_PROXY_RESOLVES_HOST;
+        const info = endpoint.auth ? protocolProxyService.newProxyInfoWithAuth(
+            endpoint.type,
+            proxy.host,
+            proxy.port,
+            endpoint.username,
+            endpoint.password,
+            '', /* aProxyAuthorizationHeader */
+            endpoint.isolationKey,
+            flags,
+            UINT32_MAX, /* aFailoverTimeout */
+            null, /* failover proxy */
+        ) : protocolProxyService.newProxyInfo(
+            endpoint.type,
             proxy.host,
             proxy.port,
             '', /* aProxyAuthorizationHeader */
-            '', /* aConnectionIsolationKey */
-            Ci.nsIProxyInfo.TRANSPARENT_PROXY_RESOLVES_HOST, /* aFlags */
+            endpoint.isolationKey,
+            flags,
             UINT32_MAX, /* aFailoverTimeout */
             null, /* failover proxy */
-        ));
+        );
+        proxyFilter.onProxyFilterResult(info);
       },
     };
     protocolProxyService.registerChannelFilter(this._channelProxyFilter, 0 /* position */);

@@ -170,6 +170,19 @@ def release_manifest(rel: dict) -> Optional[dict]:
     return http_json(asset["browser_download_url"])
 
 
+def published_browser_release(releases: Sequence[dict]) -> Optional[dict]:
+    """The newest published browser release, drafts and library tags excluded.
+
+    The API lists newest first. A repository with none cannot pin `camoufox fetch`.
+    """
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        if _BROWSER_TAG.match(rel.get("tag_name") or ""):
+            return rel
+    return None
+
+
 def paired_release(releases: Sequence[dict], digest: str) -> Optional[dict]:
     """The newest published browser release built from these sources."""
     for rel in releases:  # the API lists newest first
@@ -440,6 +453,21 @@ def _releases(args: argparse.Namespace) -> List[dict]:
     return github_releases(repo_name())
 
 
+def cmd_has_browser_release(args: argparse.Namespace) -> int:
+    """Exit 0 when this repository has published a browser release.
+
+    The install job pins `camoufox fetch` to one. A fork that has never
+    published one cannot, and tests.yml skips that job instead of failing the
+    gate before the source build.
+    """
+    found = published_browser_release(_releases(args))
+    if not found:
+        log("no published browser release")
+        return 1
+    log(f"published browser release {found['tag_name']}")
+    return 0
+
+
 def cmd_paired(args: argparse.Namespace) -> int:
     pairing = find_paired(_releases(args), Path(args.root).resolve())
     for rel in pairing.ahead:
@@ -599,6 +627,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     p = sub.add_parser("set-build"); p.add_argument("--tag", required=True); p.set_defaults(fn=cmd_set_build)
     p = sub.add_parser("manifest"); p.add_argument("--tag", required=True); p.add_argument("--digest", required=True)
     p.add_argument("--commit", required=True); p.set_defaults(fn=cmd_manifest)
+    p = sub.add_parser("has-browser-release")
+    p.add_argument("--releases", metavar="JSON",
+                   help="the releases as the GitHub API lists them, instead of asking it")
+    p.set_defaults(fn=cmd_has_browser_release)
     p = sub.add_parser("paired")
     p.add_argument("--root", default=str(REPO_ROOT), help="the checkout to pair (default: this one)")
     p.add_argument("--releases", metavar="JSON",

@@ -78,6 +78,20 @@ def test_a_library_pairs_with_the_newest_non_draft_release_from_its_sources():
     assert paired_release(releases, "ccc") is None
 
 
+def test_a_published_browser_release_ignores_drafts_and_library_tags():
+    assert release.published_browser_release([]) is None
+    assert release.published_browser_release([
+        {"tag_name": "v0.5.7", "draft": False},
+        {"tag_name": "v156.0.1-beta.36", "draft": True},
+    ]) is None
+    found = release.published_browser_release([
+        {"tag_name": "v0.5.7", "draft": False},
+        {"tag_name": "v156.0.1-beta.38", "draft": False},
+        {"tag_name": "v156.0.1-beta.36", "draft": False},
+    ])
+    assert found["tag_name"] == "v156.0.1-beta.38"
+
+
 def test_a_release_without_a_manifest_asset_is_not_downloaded(monkeypatch):
     monkeypatch.setattr(release, "http_json", lambda url: pytest.fail(f"fetched {url}"))
     assert release.release_manifest({"tag_name": "v152.0.4-beta.30", "assets": [{"name": "a.zip"}]}) is None

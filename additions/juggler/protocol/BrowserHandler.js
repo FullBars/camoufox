@@ -135,6 +135,11 @@ export class BrowserHandler {
     return {targetId};
   }
 
+  async ['Browser.newPageInWindow']({browserContextId, targetId}) {
+    const newTargetId = await this._targetRegistry.newPageInWindow({browserContextId, targetId});
+    return {targetId: newTargetId};
+  }
+
   async ['Browser.close']() {
     let browserWindow = Services.wm.getMostRecentWindow(
       "navigator:browser"

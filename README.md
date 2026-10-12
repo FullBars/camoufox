@@ -608,6 +608,109 @@ graph TD
 
 This was originally based on the LibreWolf build system.
 
+## Team Browser tab containers
+
+`Browser.newPage` is unchanged. It opens a new window with one tab, in the
+given `browserContextId`, or in the default context when that parameter is
+omitted.
+
+`Browser.newPageInWindow` adds a tab to a window that is already open, so
+several cookie partitions can share one tab strip. The schema lives in
+[`additions/juggler/protocol/Protocol.js`](additions/juggler/protocol/Protocol.js);
+[`additions/juggler/protocol/PROTOCOL.md`](additions/juggler/protocol/PROTOCOL.md)
+is the short form.
+
+```json
+{
+  "id": 2,
+  "method": "Browser.newPageInWindow",
+  "params": {
+    "targetId": "<page already open in the window>",
+    "browserContextId": "<context, optional>"
+  }
+}
+```
+
+The response is `{ "targetId": "<new page>" }`, the same shape as
+`Browser.newPage`. `targetId` is any page already in that window. The new tab
+is selected, and its Firefox container is the context's `userContextId`.
+Cookie and storage isolation stay on that id. The tab does not inherit the
+anchor tab's container.
+
+The window is shared, so a context viewport still resizes it, the same way any
+new tab in that window already does.
+
+### SOCKS proxies
+
+`Browser.setBrowserProxy` and `Browser.setContextProxy` take `type`, `host`,
+`port`, `bypass`, and optional `username` and `password`. `type` is `http`,
+`https`, `socks`, `socks5`, or `socks4`. `socks` and `socks5` are both SOCKS5.
+Leave the username and password off for a no-auth proxy. Set both for RFC 1929
+username/password. `socks4` accepts a username (the userid) and rejects a
+password, which Firefox's SOCKS4 handshake does not send. HTTP and HTTPS
+credentials are unchanged. Details and the JSON shape are in
+[`additions/juggler/protocol/PROTOCOL.md`](additions/juggler/protocol/PROTOCOL.md).
+
+### Triggering a release build
+
+Firefox is not compiled on every push. `.github/workflows/tests.yml` builds
+linux x86_64 when a pull request changes browser sources, and also when no
+published browser release was built from this tree. The "Install from the
+packages" job downloads a published browser and pins `camoufox fetch` to it.
+Until this repository has a browser Release, that job is skipped
+(`has_published_browser=false`) and the pull request compiles from source
+instead. A repository that already publishes releases is unchanged: the
+install job still runs.
+
+The downloadable zip is published by
+[`.github/workflows/browser-release.yml`](.github/workflows/browser-release.yml),
+which reuses the compile and package steps from `release.yml`. It does not
+run on pull requests.
+
+The Actions button lists only workflows that exist on the default branch.
+This file is also on `main` for that button. `main` is not the
+`v156.0.1-beta.36` line, so a dispatch from `main` must set `ref`.
+
+Preferred, once the pull request's Tests check is green: merge into
+`v156.0.1-beta.36`, then push a new browser tag. The tag push runs the
+workflow file in that commit. It does not need the file on `main`.
+
+```bash
+git checkout v156.0.1-beta.36
+git merge --ff-only <pull-request-branch>
+git push origin v156.0.1-beta.36
+git tag v156.0.1-beta.38
+git push origin v156.0.1-beta.38
+```
+
+`v156.0.1-beta.38` is the next unused number after the tags in this repo at
+the time of writing (`ci.release next_browser_release`). If another browser
+tag lands first, use the number that command prints instead. Do not reuse a
+tag that already points at an older commit.
+
+- **Actions → Browser release → Run workflow.** Default is linux x86_64 on
+  `ubuntu-24.04`. Set `platforms` to `all` for the linux, windows and macOS
+  matrix `release.yml` already cross-compiles from Linux. Leave `tag` empty
+  to publish the next unused `v<version>-<prefix>.<n>` after the tags already
+  in the repo (the same numbering as `ci.release`). Set `ref` to the branch,
+  tag, or commit to compile. From `main`, that is
+  `v156.0.1-beta.36` after the merge, or the feature branch before it.
+  Leaving `ref` empty compiles whatever ref you picked in "Use workflow from".
+- **Push a new tag**, as in the commands above. A browser tag
+  `v<version>-<prefix>.<n>` is applied with `python3 -m ci.release set-build`
+  before compile, so the zip's release number matches the tag. Library tags
+  (`v0.5.7`) do not match and do not start a compile.
+
+The asset name is `scripts/package.py`'s name:
+`camoufox-<version>-<release>-lin.x86_64.zip` (`win.` and `mac.` for the other
+platforms). The release is a prerelease and is not marked latest.
+
+To compile on a self-hosted runner later, set the workflow input `runner` to
+that runner's label (for example `self-hosted`), or set the repository variable
+`CAMOUFOX_BUILD_RUNNER`. The default remains the public GitHub-hosted runner
+`ubuntu-24.04`. Publishing the release still runs on `ubuntu-24.04`; only the
+compile job moves.
+
 ## Build CLI
 
 > [!WARNING]
