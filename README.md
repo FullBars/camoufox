@@ -653,22 +653,53 @@ credentials are unchanged. Details and the JSON shape are in
 
 ### Triggering a release build
 
-Firefox is not compiled on every push. `.github/workflows/tests.yml` still
-builds linux x86_64 on a pull request that changes `additions/` (including
-Juggler). The downloadable zip is published by
+Firefox is not compiled on every push. `.github/workflows/tests.yml` builds
+linux x86_64 when a pull request changes browser sources, and also when no
+published browser release was built from this tree. The "Install from the
+packages" job downloads a published browser and pins `camoufox fetch` to it.
+Until this repository has a browser Release, that job is skipped
+(`has_published_browser=false`) and the pull request compiles from source
+instead. A repository that already publishes releases is unchanged: the
+install job still runs.
+
+The downloadable zip is published by
 [`.github/workflows/browser-release.yml`](.github/workflows/browser-release.yml),
-which reuses the compile and package steps from `release.yml`:
+which reuses the compile and package steps from `release.yml`. It does not
+run on pull requests.
+
+The Actions button lists only workflows that exist on the default branch.
+This file is also on `main` for that button. `main` is not the
+`v156.0.1-beta.36` line, so a dispatch from `main` must set `ref`.
+
+Preferred, once the pull request's Tests check is green: merge into
+`v156.0.1-beta.36`, then push a new browser tag. The tag push runs the
+workflow file in that commit. It does not need the file on `main`.
+
+```bash
+git checkout v156.0.1-beta.36
+git merge --ff-only <pull-request-branch>
+git push origin v156.0.1-beta.36
+git tag v156.0.1-beta.38
+git push origin v156.0.1-beta.38
+```
+
+`v156.0.1-beta.38` is the next unused number after the tags in this repo at
+the time of writing (`ci.release next_browser_release`). If another browser
+tag lands first, use the number that command prints instead. Do not reuse a
+tag that already points at an older commit.
 
 - **Actions → Browser release → Run workflow.** Default is linux x86_64 on
   `ubuntu-24.04`. Set `platforms` to `all` for the linux, windows and macOS
   matrix `release.yml` already cross-compiles from Linux. Leave `tag` empty
   to publish the next unused `v<version>-<prefix>.<n>` after the tags already
-  in the repo (the same numbering as `ci.release`).
-- **Push a new tag**, for example one number past the newest
-  `v156.0.1-beta.*` tag. A browser tag `v<version>-<prefix>.<n>` is applied
-  with `python3 -m ci.release set-build` before compile, so the zip's release
-  number matches the tag. Reusing a tag that already points at an older
-  commit does not move that commit.
+  in the repo (the same numbering as `ci.release`). Set `ref` to the branch,
+  tag, or commit to compile. From `main`, that is
+  `v156.0.1-beta.36` after the merge, or the feature branch before it.
+  Leaving `ref` empty compiles whatever ref you picked in "Use workflow from".
+- **Push a new tag**, as in the commands above. A browser tag
+  `v<version>-<prefix>.<n>` is applied with `python3 -m ci.release set-build`
+  before compile, so the zip's release number matches the tag. Library tags
+  (`v0.5.7`) do not match and do not start a compile.
 
 The asset name is `scripts/package.py`'s name:
 `camoufox-<version>-<release>-lin.x86_64.zip` (`win.` and `mac.` for the other

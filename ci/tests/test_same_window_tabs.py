@@ -137,6 +137,15 @@ def test_browser_release_is_tag_or_dispatch_only():
     assert inputs["platforms"]["options"] == ["linux", "all"]
     assert inputs["runner"]["default"] == "ubuntu-24.04"
     assert "self-hosted" in inputs["runner"]["description"]
+    assert inputs["ref"]["required"] is False
+    assert "beta" in inputs["ref"]["description"]
+
+    plan_ref = _checkout_ref(data["jobs"]["plan"])
+    assert "inputs.ref" in plan_ref
+    assert "github.sha" in plan_ref
+    compiled = "${{ needs.plan.outputs.sha }}"
+    assert _checkout_ref(data["jobs"]["build"]) == compiled
+    assert _checkout_ref(data["jobs"]["publish"]) == compiled
 
     build = data["jobs"]["build"]
     assert build["runs-on"] == "${{ needs.plan.outputs.runner }}"
@@ -157,6 +166,8 @@ def test_browser_release_is_tag_or_dispatch_only():
     assert "camoufox-*.zip" in _job_text(publish)
     assert "--prerelease" in _job_text(publish)
     assert "--latest=false" in _job_text(publish)
+    assert 'SOURCE_SHA' in _job_text(publish)
+    assert "--target \"$SOURCE_SHA\"" in _job_text(publish)
 
 
 def test_release_scripts_parse_and_the_plan_picks_linux():
@@ -168,6 +179,9 @@ def test_release_scripts_parse_and_the_plan_picks_linux():
 
     out = _plan(plan_script, REF_TYPE="branch", REF_NAME="v156.0.1-beta.36")
     assert out["runner"] == "ubuntu-24.04"
+    assert out["sha"] == subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout.strip()
     # A branch that happens to be named like a tag does not republish that tag.
     assert out["tag"] == _next_browser_tag()
     assert out["matrix"] == '{"include":[{"target":"linux","arch":"x86_64"}]}'
@@ -218,6 +232,13 @@ def _plan(script: str, **env: str) -> dict:
             key, value = line.split("=", 1)
             parsed[key] = value
         return parsed
+
+
+def _checkout_ref(job: dict) -> str:
+    for step in job["steps"]:
+        if str(step.get("uses", "")).startswith("actions/checkout"):
+            return step["with"]["ref"]
+    raise AssertionError("no checkout")
 
 
 def _job_text(job: dict) -> str:

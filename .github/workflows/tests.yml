@@ -119,6 +119,7 @@ jobs:
       version_note: ${{ steps.versions.outputs.note }}
       browser_changed: ${{ steps.scope.outputs.browser_changed }}
       browser_tag: ${{ steps.scope.outputs.browser_tag }}
+      has_published_browser: ${{ steps.scope.outputs.has_published_browser }}
       has_sundial: ${{ steps.sundial.outputs.has_sundial }}
       shard_matrix: ${{ steps.shards.outputs.matrix }}
     steps:
@@ -155,6 +156,15 @@ jobs:
         # users are running, which takes a minute instead of seventy -- as long
         # as that build matches this tree's browser sources (see below).
         run: |
+          # Explicitly false only when the API lists no browser release. The
+          # install job is skipped in that case; anything else, including a
+          # missing output, still runs it. A fork's first binary is the build
+          # job below, not a download of a release that does not exist.
+          if python3 -m ci.release has-browser-release; then
+            echo "has_published_browser=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_published_browser=false" >> "$GITHUB_OUTPUT"
+          fi
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "browser_changed=true" >> "$GITHUB_OUTPUT"
             echo "::notice::Not a pull request -- building, which also refreshes the shared ccache."
@@ -314,6 +324,17 @@ jobs:
           # April-2025 model. Install the pinned one first: see
           # scripts/pin-fpgen-model.py.
           python3 scripts/pin-fpgen-model.py
+      - name: Virtual display
+        # tests/test_virtdisplay.py launches Xvfb itself. On a fresh runner the
+        # first start can spend the ten-second displayfd bound
+        # (ci/tribal-rules.yml) inside fontconfig, and the later launches in
+        # the same process then pass. Install the package, as the typescript
+        # job does, and warm one display so that bound still means "hung"
+        # rather than "cold".
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb
+          timeout 60 xvfb-run -a true
       - name: Run
         # pythonlib resolves the published release through the GitHub API
         # (pkgman.py honours GITHUB_TOKEN). Unauthenticated, a runner shares the
@@ -405,6 +426,12 @@ jobs:
     # real `camoufox fetch`, with TMPDIR on its own tmpfs so a rename from the
     # temporary directory into the cache fails here as it fails for users
     # (EXDEV). See ci/run_install.py.
+    #
+    # fetch downloads a published browser. A repository that has never published
+    # one (this fork, before its first Release) cannot pin that download, and
+    # failing here used to cancel the source build that produces it. Skip only
+    # on an explicit false. The build job still compiles linux x86_64.
+    if: needs.resolve.outputs.has_published_browser != 'false'
     needs: [resolve, static]
     runs-on: ubuntu-24.04
     permissions:
@@ -1197,7 +1224,10 @@ jobs:
           # summarize report "produced no result file" and fail the gate on
           # every pull request that did not touch the browser. Which is most of
           # them, and exactly the cheap path this pipeline advertises.
-          required="pythonlib typescript install typescript_browser native_rules patch_guards_spoofing patch_guards_automation patch_guards_parity skiplist_audit build_tester playwright native_browser native_growth"
+          required="pythonlib typescript typescript_browser native_rules patch_guards_spoofing patch_guards_automation patch_guards_parity skiplist_audit build_tester playwright native_browser native_growth"
+          if [ "${{ needs.resolve.outputs.has_published_browser }}" != "false" ]; then
+            required="$required install"
+          fi
           if [ "${{ needs.resolve.outputs.browser_changed }}" = "true" ]; then
             required="$required build"
           fi
@@ -1274,6 +1304,7 @@ jobs:
           RESULTS: ${{ toJSON(needs) }}
           BROWSER_CHANGED: ${{ needs.resolve.outputs.browser_changed }}
           HAS_SUNDIAL: ${{ needs.resolve.outputs.has_sundial }}
+          HAS_PUBLISHED_BROWSER: ${{ needs.resolve.outputs.has_published_browser }}
         run: |
           python3 - <<'PY'
           import json, os, sys
@@ -1282,10 +1313,13 @@ jobs:
           built = os.environ.get("BROWSER_CHANGED") == "true"
 
           # The only jobs allowed to be skipped, and only for these reasons.
+          # install is skipped only when resolve proved there is no published
+          # browser release to pin. Any other skip still fails the gate.
           may_skip = {
               "build": not built,
               "fetch-browser": built,
               "sundial": os.environ.get("HAS_SUNDIAL") != "true",
+              "install": os.environ.get("HAS_PUBLISHED_BROWSER") == "false",
           }
 
           problems = []

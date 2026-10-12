@@ -1776,7 +1776,7 @@ def test_the_workflow_checks_the_fetched_build():
 # ---------------------------------------------------------------------------
 
 
-def _required_suites(browser_changed: str, has_sundial: str) -> set:
+def _required_suites(browser_changed: str, has_sundial: str, has_published: str = "true") -> set:
     """Run the workflow's own `required=` assembly and report what it produced.
 
     Extracted and executed rather than pattern-matched, because the bug this
@@ -1792,6 +1792,7 @@ def _required_suites(browser_changed: str, has_sundial: str) -> set:
     block = text[start:end]
     block = block.replace("${{ needs.resolve.outputs.browser_changed }}", browser_changed)
     block = block.replace("${{ needs.resolve.outputs.has_sundial }}", has_sundial)
+    block = block.replace("${{ needs.resolve.outputs.has_published_browser }}", has_published)
     proc = subprocess.run(
         ["bash", "-c", block + '\necho "$required"'],
         capture_output=True, text=True,
@@ -1828,6 +1829,72 @@ def test_the_browser_suites_are_required_either_way():
 def test_sundial_is_required_only_when_there_is_a_credential():
     assert "sundial" in _required_suites("true", "true")
     assert "sundial" not in _required_suites("true", "false")
+
+
+def test_install_is_required_only_when_a_browser_release_exists():
+    """A fork with no Release cannot pin camoufox fetch.
+
+    Requiring the install suite there fails the summary before the source
+    build that would publish the first binary. Upstream, where a release
+    exists, the suite stays required whether or not this pull request rebuilt.
+    """
+    assert "install" in _required_suites("true", "false", "true")
+    assert "install" in _required_suites("false", "false", "true")
+    assert "install" not in _required_suites("true", "false", "false")
+
+
+def _gate(results: dict, browser_changed: str, has_sundial: str, has_published: str):
+    """Run the gate job's own checker against one set of job results."""
+    import subprocess
+    import sys
+
+    text = WORKFLOW.read_text(encoding="utf-8")
+    start = text.index("          python3 - <<'PY'\n          import json, os, sys")
+    body = text[start:].split("\n          PY\n", 1)[0]
+    lines = body.splitlines()[1:]
+    script = "\n".join(line[10:] if line.startswith(" " * 10) else line for line in lines) + "\n"
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True,
+        env={
+            **os.environ,
+            "RESULTS": json.dumps(results),
+            "BROWSER_CHANGED": browser_changed,
+            "HAS_SUNDIAL": has_sundial,
+            "HAS_PUBLISHED_BROWSER": has_published,
+        },
+    )
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+def test_the_gate_skips_install_only_when_no_browser_release_is_published():
+    names = [
+        "resolve", "static", "pythonlib", "typescript", "install", "build",
+        "fetch-browser", "playwright", "patch-guards", "build-tester", "native",
+        "typescript-browser", "growth", "sundial", "summary",
+    ]
+    def results(install="success", build="success", fetch="skipped"):
+        out = {name: {"result": "success"} for name in names}
+        out["install"] = {"result": install}
+        out["build"] = {"result": build}
+        out["fetch-browser"] = {"result": fetch}
+        out["sundial"] = {"result": "skipped"}
+        return out
+
+    code, log = _gate(results(), "true", "false", "true")
+    assert code == 0, log
+
+    code, log = _gate(results(install="skipped"), "true", "false", "false")
+    assert code == 0, log
+    assert "install: skipped" in log
+
+    code, log = _gate(results(install="skipped"), "true", "false", "true")
+    assert code == 1
+    assert "install: skipped" in log
+
+    code, log = _gate(results(install="failure"), "true", "false", "false")
+    assert code == 1
+    assert "install: failure" in log
 
 
 # ---------------------------------------------------------------------------
@@ -2645,7 +2712,7 @@ def _scope(repo: pathlib.Path, base: str, releases=None) -> tuple[str, str]:
     import subprocess
 
     text = WORKFLOW.read_text(encoding="utf-8")
-    start = text.index("        run: |\n          if [ \"${{ github.event_name }}\" != \"pull_request\" ]")
+    start = text.index("        run: |\n          # Explicitly false only when the API lists no browser release.")
     end = text.index("      - name: May the stealth check run?", start)
     lines = text[start:end].splitlines()[1:]
     block = "\n".join(line[10:] if line.startswith(" " * 10) else line.strip() for line in lines)
@@ -2653,7 +2720,12 @@ def _scope(repo: pathlib.Path, base: str, releases=None) -> tuple[str, str]:
     block = block.replace("${{ github.event.pull_request.base.sha }}", base)
     listed = repo.parent / "releases.json"
     listed.write_text(json.dumps(PUBLISHED if releases is None else releases))
+    assert "python3 -m ci.release has-browser-release" in block
     assert "python3 -m ci.release paired" in block, "the step no longer asks ci.release for the pairing"
+    block = block.replace(
+        "python3 -m ci.release has-browser-release",
+        f"python3 -m ci.release has-browser-release --releases {listed}",
+    )
     block = block.replace(
         "python3 -m ci.release paired",
         f"python3 -m ci.release paired --root {repo} --releases {listed}",
@@ -2699,7 +2771,9 @@ def test_driver_pr_on_the_released_sources_tests_the_release(release_repo):
     base = _git(release_repo, "rev-parse", "HEAD")
     (release_repo / "typescript" / "x.ts").write_text("y\n")
     _git(release_repo, "commit", "-qam", "driver change")
-    assert "browser_changed=false" in _scope(release_repo, base)[0].splitlines()
+    lines = _scope(release_repo, base)[0].splitlines()
+    assert "browser_changed=false" in lines
+    assert "has_published_browser=true" in lines
 
 
 def test_driver_pr_on_unreleased_browser_sources_builds(release_repo):
@@ -2711,7 +2785,8 @@ def test_driver_pr_on_unreleased_browser_sources_builds(release_repo):
     (release_repo / "typescript" / "x.ts").write_text("y\n")
     _git(release_repo, "commit", "-qam", "driver change")
     result, log = _scope(release_repo, base)
-    assert result == "browser_changed=true"
+    assert "browser_changed=true" in result.splitlines()
+    assert "has_published_browser=true" in result.splitlines()
     assert "patches/a.patch" in log
 
 
@@ -2719,7 +2794,9 @@ def test_browser_pr_builds(release_repo):
     base = _git(release_repo, "rev-parse", "HEAD")
     (release_repo / "patches" / "a.patch").write_text("b\n")
     _git(release_repo, "commit", "-qam", "browser change")
-    assert _scope(release_repo, base)[0] == "browser_changed=true"
+    lines = _scope(release_repo, base)[0].splitlines()
+    assert "browser_changed=true" in lines
+    assert "has_published_browser=true" in lines
 
 
 def test_unpublished_release_tag_builds(release_repo):
@@ -2727,7 +2804,9 @@ def test_unpublished_release_tag_builds(release_repo):
     base = _git(release_repo, "rev-parse", "HEAD")
     (release_repo / "typescript" / "x.ts").write_text("y\n")
     _git(release_repo, "commit", "-qam", "driver change")
-    assert _scope(release_repo, base)[0] == "browser_changed=true"
+    lines = _scope(release_repo, base)[0].splitlines()
+    assert "browser_changed=true" in lines
+    assert "has_published_browser=true" in lines
 
 
 @pytest.mark.parametrize("releases", [[], [{**PUBLISHED[0], "draft": True}]], ids=["missing", "draft"])
@@ -2736,7 +2815,9 @@ def test_driver_pr_whose_release_is_not_published_builds(release_repo, releases)
     base = _git(release_repo, "rev-parse", "HEAD")
     (release_repo / "typescript" / "x.ts").write_text("y\n")
     _git(release_repo, "commit", "-qam", "driver change")
-    assert _scope(release_repo, base, releases)[0] == "browser_changed=true"
+    lines = _scope(release_repo, base, releases)[0].splitlines()
+    assert "browser_changed=true" in lines
+    assert "has_published_browser=false" in lines
 
 
 def test_driver_pr_tests_the_prerelease_of_its_sources_not_the_latest_release(release_repo):

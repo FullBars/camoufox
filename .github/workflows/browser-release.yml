@@ -9,10 +9,16 @@ name: Browser release
 # Triggers:
 #   workflow_dispatch   linux x86_64 on ubuntu-24.04, unless inputs say otherwise.
 #                       With no tag input, the release tag is the next unused
-#                       v<version>-<prefix>.<n>.
+#                       v<version>-<prefix>.<n>. `ref` selects what is compiled.
+#                       Empty means the ref that triggered the run. The Actions
+#                       button only lists this file once it is on the default
+#                       branch; from main, set ref to the beta branch or tag.
+#                       main's tree is not that line.
 #   tag v<version>-*    a browser tag such as v156.0.1-beta.38. Library tags
 #                       (v0.5.7) do not match. set-build writes the tag's
 #                       number into upstream.sh so the zip name matches.
+#                       The workflow file at the tagged commit is the one that
+#                       runs, so this does not require the file on main.
 #
 # `runner` defaults to ubuntu-24.04. Set the input, or the repository variable
 # CAMOUFOX_BUILD_RUNNER, to a self-hosted label when a larger machine exists.
@@ -34,6 +40,10 @@ on:
         default: ubuntu-24.04
       tag:
         description: "GitHub Release tag. Empty: the tag ref, or this branch if it is a browser tag, otherwise v<version>-<release> from upstream.sh"
+        type: string
+        required: false
+      ref:
+        description: "Branch, tag, or commit to compile. Empty: the ref that triggered this run. From main, set the beta branch or tag."
         type: string
         required: false
   push:
@@ -58,10 +68,11 @@ jobs:
       matrix: ${{ steps.set.outputs.matrix }}
       runner: ${{ steps.set.outputs.runner }}
       tag: ${{ steps.set.outputs.tag }}
+      sha: ${{ steps.set.outputs.sha }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.ref || github.sha }}
           fetch-depth: 0
 
       - id: set
@@ -108,10 +119,12 @@ jobs:
             echo "::error::could not decide a release tag"
             exit 1
           fi
+          sha=$(git rev-parse HEAD)
           echo "runner=$runner" >> "$GITHUB_OUTPUT"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Building $platforms as $tag on $runner"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building $platforms as $tag on $runner at $sha"
 
   build:
     name: Build (${{ matrix.target }} ${{ matrix.arch }})
@@ -159,7 +172,7 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.plan.outputs.sha }}
 
       - name: Name this release
         # No-op unless the tag is v<firefox version>-<prefix>.<n>. The number
@@ -249,7 +262,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.plan.outputs.sha }}
 
       - name: Download the builds
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -261,9 +274,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.plan.outputs.tag }}
+          SOURCE_SHA: ${{ needs.plan.outputs.sha }}
         run: |
           set -euo pipefail
           test -n "$TAG"
+          test -n "$SOURCE_SHA"
           digest=$(python3 -m ci.browser_inputs --source-digest)
           python3 -m ci.release manifest --tag "$TAG" --digest "$digest" --commit "$GITHUB_SHA" > manifest.json
           cat manifest.json
@@ -291,7 +306,7 @@ jobs:
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}" manifest.json
           else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
               --prerelease --latest=false --title "$TAG" --notes-file notes.md \
               "${files[@]}" manifest.json
           fi
